@@ -1,0 +1,32 @@
+{
+  "mapping": {
+    "mode": "relative",
+    "unsorted_folder": "_UNSORTED",
+    "regex_rules": [
+      {
+        "name": "MECT-KYCT-CKB latin",
+        "pattern": "MECT-(?P<field>\\d+)\\s+KYCT-(?P<cluster>[\\wА-Яа-яЁё-]+)\\s+CKB-(?P<well>[\\wА-Яа-яЁё-]+)",
+        "dest_template": "Местор{field}/Куст-{cluster}/Скв-{well}"
+      },
+      {
+        "name": "Местор куст скв cyrillic",
+        "pattern": "Местор\\s*(?P<field>\\d+)\\s+куст\\s*(?P<cluster>[\\wА-Яа-яЁё-]+)\\s+скв\\s*(?P<well>[\\wА-Яа-яЁё-]+)",
+        "dest_template": "Местор{field}/Куст-{cluster}/Скв-{well}"
+      }
+    ]
+  },
+  "errors": {
+    "stop_on_network_winerrors": [
+      53,
+      64,
+      67,
+      121,
+      1231,
+      1222
+    ],
+    "locked_file_winerrors": [
+      32,
+      33
+    ]
+  }
+}
