@@ -23,8 +23,11 @@ def _is_winerror(exc: BaseException, codes: List[int]) -> bool:
 
 
 def _copy_atomic(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    if not dst.parent.exists():
+        raise FileNotFoundError(f"Папка назначения не найдена: {dst.parent}")
+
     tmp = dst.with_name(dst.name + f".tmp.{uuid.uuid4().hex}")
+
     try:
         shutil.copy2(src, tmp)
         os.replace(tmp, dst)

@@ -2,88 +2,177 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict
 import re
 
-from filesorter.config import AppConfig
+
+@dataclass(frozen=True)
+class ParsedName:
+    field: str | None
+    cluster: str | None
+    well: str | None
 
 
 @dataclass(frozen=True)
 class MapResult:
-    """
-    Результат маппинга: относительный путь назначения под dest_root.
-
-    planner.py использует map_res.dst_rel
-    """
     dst_rel: Path
-    rule_name: Optional[str] = None
+    reason: str = "found_existing_folder"
 
 
-_ILLEGAL_WIN_CHARS = r'<>:"/\\|?*'
+def _normalize(text: str) -> str:
+    text = text.lower()
+    text = text.replace("ё", "е")
+    text = text.replace("_", "-")
+    text = text.replace(" ", "")
+    return text
 
 
-def _sanitize_component(value: str) -> str:
+def parse_file_name(filename: str) -> ParsedName:
     """
-    Мини-санитайзер компонента пути (особенно актуально для regex-групп).
-    Удаляет символы, запрещённые в именах файлов/папок Windows.
-    """
-    v = value.strip()
-    if not v:
-        return "_"
-    # заменяем запрещенные символы на '_'
-    table = str.maketrans({ch: "_" for ch in _ILLEGAL_WIN_CHARS})
-    v = v.translate(table)
-    # Чтобы не получить компоненты вида "...." или пустые после замены
-    v = v.strip(" .")
-    return v or "_"
+    Достаёт месторождение / куст / скважину из имени файла.
 
-
-def map_destination(src_file: Path, source_root: Path, cfg: AppConfig) -> MapResult:
-    """
-    Возвращает ОТНОСИТЕЛЬНЫЙ путь назначения (под B) для исходного файла src_file.
-
-    Режимы:
-    - cfg.mapping.mode == "relative": сохраняем относительную структуру от source_root.
-    - cfg.mapping.mode == "regex": пытаемся применить regex_rules к имени файла и
-      собрать подпапки по dest_template, иначе кладем в unsorted_folder.
-
-    ВАЖНО: функция не создает папки, не делает I/O — только строит путь.
+    Поддерживает:
+    - Местор7 куст8 скв801
+    - MECT-7 KYCT-37 CKB-3704
+    - Куст_15 Скв_2232
     """
 
-    mode = (cfg.mapping.mode or "relative").strip().lower()
+    name = _normalize(filename)
 
-    # 1) Самый надежный режим: сохраняем относительный путь от A.
-    if mode != "regex":
-        try:
-            rel = src_file.relative_to(source_root)
-        except Exception:
-            # Если path не relative (редкий случай, но лучше не падать)
-            rel = Path(src_file.name)
-        return MapResult(dst_rel=rel, rule_name=None)
+    field = None
+    cluster = None
+    well = None
 
-    # 2) Regex-режим: пытаемся извлечь параметры из имени файла.
-    fname = src_file.name
+    # Местор7
+    m = re.search(r"местор[-]?(\d+[а-яa-z0-9]*)", name)
+    if m:
+        field = m.group(1)
 
-    for rule in cfg.mapping.regex_rules:
-        rx = rule.compile()
-        m = rx.search(fname)
-        if not m:
+    # MECT-7
+    m = re.search(r"mect[-]?(\d+[a-zа-я0-9]*)", name)
+    if m:
+        field = m.group(1)
+
+    # куст8 / куст-15Б / куст_15
+    m = re.search(r"куст[-]?(\d+[а-яa-z0-9]*)", name)
+    if m:
+        cluster = m.group(1)
+
+    # KYCT-37
+    m = re.search(r"kyct[-]?(\d+[a-zа-я0-9]*)", name)
+    if m:
+        cluster = m.group(1)
+
+    # скв801 / скв-2232
+    m = re.search(r"скв[-]?(\d+[а-яa-z0-9]*)", name)
+    if m:
+        well = m.group(1)
+
+    # CKB-3704
+    m = re.search(r"ckb[-]?(\d+[a-zа-я0-9]*)", name)
+    if m:
+        well = m.group(1)
+
+    return ParsedName(field=field, cluster=cluster, well=well)
+
+
+def _cluster_matches(folder_name: str, cluster: str) -> bool:
+    """
+    Проверяем папку куста.
+
+    Пример:
+    cluster = 15
+    подходит:
+    - Куст-15
+    - Куст-15Б
+    - куст-15б
+    """
+
+    folder = _normalize(folder_name)
+    cluster = _normalize(cluster)
+
+    return (
+        folder == f"куст-{cluster}"
+        or folder == f"куст{cluster}"
+        or folder.startswith(f"куст-{cluster}")
+        or folder.startswith(f"куст{cluster}")
+    )
+
+
+def _well_matches(folder_name: str, well: str) -> bool:
+    """
+    Проверяем папку скважины.
+
+    Пример:
+    well = 801
+    подходит:
+    - 801
+    - 801В
+    - 801в
+    """
+
+    folder = _normalize(folder_name)
+    well = _normalize(well)
+
+    return folder == well or folder.startswith(well)
+
+
+def find_existing_target_folder(dest_root: Path, parsed: ParsedName) -> Path | None:
+    """
+    Ищет уже существующую папку назначения в Б.
+
+    ВАЖНО:
+    - папки НЕ создаются
+    - если найдено несколько вариантов, возвращаем None,
+      чтобы не положить файл не туда
+    """
+
+    if not parsed.well:
+        return None
+
+    candidates: list[Path] = []
+
+    for path in dest_root.rglob("*"):
+        if not path.is_dir():
             continue
 
-        raw_groups: Dict[str, str] = {
-            k: v for k, v in m.groupdict().items()
-            if v is not None
-        }
-        # Санитизация значений групп, чтобы они были пригодны как компоненты пути.
-        groups = {k: _sanitize_component(v) for k, v in raw_groups.items()}
+        # Ищем папку скважины
+        if not _well_matches(path.name, parsed.well):
+            continue
 
-        try:
-            rel_dir = Path(rule.dest_template.format(**groups))
-            rel = rel_dir / fname
-            return MapResult(dst_rel=rel, rule_name=rule.name)
-        except Exception:
-            # Если шаблон кривой (нет нужной группы и т.п.) — не валим весь прогон
-            break
+        # Если известен куст — проверяем родительскую папку
+        if parsed.cluster:
+            parent = path.parent
+            if not _cluster_matches(parent.name, parsed.cluster):
+                continue
 
-    # 3) Fallback: если ни одно правило не сработало
-    return MapResult(dst_rel=Path(cfg.mapping.unsorted_folder) / fname, rule_name=None)
+        candidates.append(path)
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # 0 вариантов — не нашли
+    # больше 1 — неоднозначно
+    return None
+
+
+def map_destination(src_file: Path, source_root: Path, dest_root: Path) -> MapResult | None:
+    """
+    Главная функция.
+
+    Возвращает путь назначения ТОЛЬКО если нужная папка уже существует в Б.
+    Новые папки не создаёт.
+    """
+
+    parsed = parse_file_name(src_file.name)
+
+    target_folder = find_existing_target_folder(dest_root, parsed)
+
+    if target_folder is None:
+        return None
+
+    dst = target_folder / src_file.name
+
+    return MapResult(
+        dst_rel=dst.relative_to(dest_root),
+        reason="found_existing_folder",
+    )

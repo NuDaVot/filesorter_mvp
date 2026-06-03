@@ -42,7 +42,21 @@ def build_plan(settings: Settings, cfg: AppConfig) -> List[PlannedOp]:
             )
             continue
 
-        map_res = map_destination(src, source_root, cfg)
+        map_res = map_destination(src, source_root, dest_root)
+
+        if map_res is None:
+            plan.append(
+                PlannedOp(
+                    src=src,
+                    dst=dest_root / src.name,
+                    action="skip",
+                    reason="target_folder_not_found",
+                    src_mtime=src_mtime,
+                    dst_mtime=None,
+                )
+            )
+            continue
+
         dst = dest_root / map_res.dst_rel
 
         if dst.exists() and dst.is_file():
