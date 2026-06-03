@@ -19,73 +19,67 @@ class MapResult:
 
 
 def _normalize(text: str) -> str:
-    text = text.lower()
-    text = text.replace("ё", "е")
-    text = text.replace("_", "-")
-    text = text.replace(" ", "")
-    return text
+    return (
+        text.lower()
+        .replace("ё", "е")
+        .replace("_", "-")
+        .replace(" ", "")
+    )
 
 
 def parse_file_name(filename: str) -> ParsedName:
-    """
-    Достаёт месторождение / куст / скважину из имени файла.
-
-    Поддерживает:
-    - Местор7 куст8 скв801
-    - MECT-7 KYCT-37 CKB-3704
-    - Куст_15 Скв_2232
-    """
-
-    name = _normalize(filename)
+    name = filename.lower().replace("ё", "е")
 
     field = None
     cluster = None
     well = None
 
-    # Местор7
-    m = re.search(r"местор[-]?(\d+[а-яa-z0-9]*)", name)
+    # Местор4 / Местор 4 / Местор-4
+    m = re.search(r"местор[\s_-]*(\d+[а-яa-z]?)", name, re.IGNORECASE)
     if m:
         field = m.group(1)
 
-    # MECT-7
-    m = re.search(r"mect[-]?(\d+[a-zа-я0-9]*)", name)
+    # MECT-4
+    m = re.search(r"mect[\s_-]*(\d+[a-zа-я]?)", name, re.IGNORECASE)
     if m:
         field = m.group(1)
 
-    # куст8 / куст-15Б / куст_15
-    m = re.search(r"куст[-]?(\d+[а-яa-z0-9]*)", name)
+    # куст28 / Куст_28 / Куст-28
+    m = re.search(r"куст[\s_-]*(\d+[а-яa-z]?)", name, re.IGNORECASE)
     if m:
         cluster = m.group(1)
 
-    # KYCT-37
-    m = re.search(r"kyct[-]?(\d+[a-zа-я0-9]*)", name)
+    # KYCT-35
+    m = re.search(r"kyct[\s_-]*(\d+[a-zа-я]?)", name, re.IGNORECASE)
     if m:
         cluster = m.group(1)
 
-    # скв801 / скв-2232
-    m = re.search(r"скв[-]?(\d+[а-яa-z0-9]*)", name)
+    # скв2198 / Скв_2203 / Скв-2332
+    m = re.search(r"скв[\s_-]*(\d+[а-яa-z]?)", name, re.IGNORECASE)
     if m:
         well = m.group(1)
 
-    # CKB-3704
-    m = re.search(r"ckb[-]?(\d+[a-zа-я0-9]*)", name)
+    # CKB-2332
+    m = re.search(r"ckb[\s_-]*(\d+[a-zа-я]?)", name, re.IGNORECASE)
     if m:
         well = m.group(1)
 
     return ParsedName(field=field, cluster=cluster, well=well)
 
 
-def _cluster_matches(folder_name: str, cluster: str) -> bool:
-    """
-    Проверяем папку куста.
+def _field_matches(folder_name: str, field: str | None) -> bool:
+    if not field:
+        return True
 
-    Пример:
-    cluster = 15
-    подходит:
-    - Куст-15
-    - Куст-15Б
-    - куст-15б
-    """
+    folder = _normalize(folder_name)
+    field = _normalize(field)
+
+    return folder == f"местор{field}" or folder.startswith(f"местор{field}")
+
+
+def _cluster_matches(folder_name: str, cluster: str | None) -> bool:
+    if not cluster:
+        return True
 
     folder = _normalize(folder_name)
     cluster = _normalize(cluster)
@@ -99,33 +93,19 @@ def _cluster_matches(folder_name: str, cluster: str) -> bool:
 
 
 def _well_matches(folder_name: str, well: str) -> bool:
-    """
-    Проверяем папку скважины.
-
-    Пример:
-    well = 801
-    подходит:
-    - 801
-    - 801В
-    - 801в
-    """
-
     folder = _normalize(folder_name)
     well = _normalize(well)
 
-    return folder == well or folder.startswith(well)
+    variants = [
+        well,
+        f"скв-{well}",
+        f"скв{well}",
+    ]
+
+    return any(folder == v or folder.startswith(v) for v in variants)
 
 
 def find_existing_target_folder(dest_root: Path, parsed: ParsedName) -> Path | None:
-    """
-    Ищет уже существующую папку назначения в Б.
-
-    ВАЖНО:
-    - папки НЕ создаются
-    - если найдено несколько вариантов, возвращаем None,
-      чтобы не положить файл не туда
-    """
-
     if not parsed.well:
         return None
 
@@ -135,14 +115,14 @@ def find_existing_target_folder(dest_root: Path, parsed: ParsedName) -> Path | N
         if not path.is_dir():
             continue
 
-        # Ищем папку скважины
         if not _well_matches(path.name, parsed.well):
             continue
 
-        # Если известен куст — проверяем родительскую папку
-        if parsed.cluster:
-            parent = path.parent
-            if not _cluster_matches(parent.name, parsed.cluster):
+        if parsed.cluster and not _cluster_matches(path.parent.name, parsed.cluster):
+            continue
+
+        if parsed.field:
+            if not any(_field_matches(parent.name, parsed.field) for parent in path.parents):
                 continue
 
         candidates.append(path)
@@ -150,29 +130,16 @@ def find_existing_target_folder(dest_root: Path, parsed: ParsedName) -> Path | N
     if len(candidates) == 1:
         return candidates[0]
 
-    # 0 вариантов — не нашли
-    # больше 1 — неоднозначно
     return None
 
 
 def map_destination(src_file: Path, source_root: Path, dest_root: Path) -> MapResult | None:
-    """
-    Главная функция.
-
-    Возвращает путь назначения ТОЛЬКО если нужная папка уже существует в Б.
-    Новые папки не создаёт.
-    """
-
     parsed = parse_file_name(src_file.name)
-
     target_folder = find_existing_target_folder(dest_root, parsed)
 
     if target_folder is None:
         return None
 
-    dst = target_folder / src_file.name
-
     return MapResult(
-        dst_rel=dst.relative_to(dest_root),
-        reason="found_existing_folder",
+        dst_rel=(target_folder / src_file.name).relative_to(dest_root)
     )
