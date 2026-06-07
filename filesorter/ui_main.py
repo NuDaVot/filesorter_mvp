@@ -786,7 +786,7 @@ class MainWindow(QMainWindow):
 
             # Скрытая настройка: в интерфейсе не показываем.
             # Файлы 0 байт не переносим.
-            skip_zero_files=False,  # TODO True
+            skip_zero_files=True,  # TODO True
         )
 
     def _on_start(self) -> None:
