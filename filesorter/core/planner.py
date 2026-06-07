@@ -29,6 +29,35 @@ def build_plan(settings: Settings, cfg: AppConfig) -> List[PlannedOp]:
         try:
             src_stat = src.stat()
             src_mtime = src_stat.st_mtime
+            src_size = src_stat.st_size
+        except Exception:
+            plan.append(
+                PlannedOp(
+                    src=src,
+                    dst=settings.dest_root / src.name,
+                    action="skip",
+                    reason="source_stat_error",
+                    src_mtime=None,
+                    dst_mtime=None,
+                )
+            )
+            continue
+
+        if settings.skip_zero_files and src_size < (1024 * 1024):  # src_size хранится размер файла в байтах
+            plan.append(
+                PlannedOp(
+                    src=src,
+                    dst=settings.source_root / settings.unprocessed_folder / src.name,
+                    action="skip",
+                    reason="zero_size_file_skipped",
+                    src_mtime=src_mtime,
+                    dst_mtime=None,
+                )
+            )
+            continue
+        try:
+            src_stat = src.stat()
+            src_mtime = src_stat.st_mtime
         except Exception:
             plan.append(
                 PlannedOp(
@@ -44,28 +73,15 @@ def build_plan(settings: Settings, cfg: AppConfig) -> List[PlannedOp]:
 
         map_res = map_destination(src, source_root, dest_root)
 
-        if map_res is None:
-            plan.append(
-                PlannedOp(
-                    src=src,
-                    dst=dest_root / src.name,
-                    action="skip",
-                    reason="target_folder_not_found",
-                    src_mtime=src_mtime,
-                    dst_mtime=None,
-                )
-            )
-            continue
-
-        dst = dest_root / map_res.dst_rel
+        dst = map_res.dst
+        reason = map_res.reason
 
         if dst.exists() and dst.is_file():
             try:
                 dst_mtime = dst.stat().st_mtime
+                dst_ctime = dst.stat().st_ctime
+                src_ctime = src.stat().st_ctime
             except Exception:
-                dst_mtime = None
-
-            if dst_mtime is None:
                 plan.append(
                     PlannedOp(
                         src=src,
@@ -76,14 +92,18 @@ def build_plan(settings: Settings, cfg: AppConfig) -> List[PlannedOp]:
                         dst_mtime=None,
                     )
                 )
-            else:
-                if src_mtime > dst_mtime:
+                continue
+
+            if settings.delete_old_files:
+                # Новый режим:
+                # если файл в Б создан раньше файла из A — будем удалять старый и копировать новый
+                if dst_ctime < src_ctime:
                     plan.append(
                         PlannedOp(
                             src=src,
                             dst=dst,
                             action=("move" if settings.mode == "move" else "copy"),
-                            reason="replace_src_newer",
+                            reason="delete_old_destination_then_copy",
                             src_mtime=src_mtime,
                             dst_mtime=dst_mtime,
                         )
@@ -94,7 +114,30 @@ def build_plan(settings: Settings, cfg: AppConfig) -> List[PlannedOp]:
                             src=src,
                             dst=dst,
                             action="skip",
-                            reason="skip_dest_newer_or_equal",
+                            reason="destination_file_is_newer_or_equal_by_creation_time",
+                            src_mtime=src_mtime,
+                            dst_mtime=dst_mtime,
+                        )
+                    )
+            else:
+                if src_mtime > dst_mtime:
+                    plan.append(
+                        PlannedOp(
+                            src=src,
+                            dst=dst,
+                            action=("move" if settings.mode == "move" else "copy"),
+                            reason="replace_src_newer_by_modified_time",
+                            src_mtime=src_mtime,
+                            dst_mtime=dst_mtime,
+                        )
+                    )
+                else:
+                    plan.append(
+                        PlannedOp(
+                            src=src,
+                            dst=dst,
+                            action="skip",
+                            reason="skip_dest_newer_or_equal_by_modified_time",
                             src_mtime=src_mtime,
                             dst_mtime=dst_mtime,
                         )
@@ -105,7 +148,7 @@ def build_plan(settings: Settings, cfg: AppConfig) -> List[PlannedOp]:
                     src=src,
                     dst=dst,
                     action=("move" if settings.mode == "move" else "copy"),
-                    reason="new",
+                    reason=reason,
                     src_mtime=src_mtime,
                     dst_mtime=None,
                 )

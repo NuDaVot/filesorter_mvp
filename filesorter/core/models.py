@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Literal
 
@@ -32,6 +32,16 @@ class Settings:
     dry_run: bool
     mapping_mode: str  # "relative" | "regex" (переопределение поверх config.json)
     cleanup_empty_dirs: bool = True
+
+    # Новый флажок:
+    # если True — перед копированием/перемещением удаляем старый файл в Б,
+    # если он создан раньше файла из A.
+    delete_old_files: bool = True
+
+    # Сюда складываем файлы, которым не нашли папку назначения
+    unprocessed_folder: str = "Не обработанно"
+    delete_exclude_folders: list[str] = field(default_factory=list)
+    skip_zero_files: bool = True
 
 
 @dataclass(frozen=True)
