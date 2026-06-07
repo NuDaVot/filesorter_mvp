@@ -113,6 +113,152 @@ def _call_with_supported_args(func: Callable[..., Any], **kwargs: Any) -> Any:
     return func(**accepted)
 
 
+def _short_reason(reason: str) -> str:
+    """Перевод технической причины в понятный русский текст."""
+    reason = str(reason or "").strip()
+
+    mapping = {
+        "target_found": "папка назначения найдена",
+        "found_existing_folder": "папка назначения найдена",
+        "target_folder_not_found": "подходящая папка назначения не найдена",
+        "target_folder_not_found_to_unprocessed": "подходящая папка назначения не найдена, файл отправлен в Не обработанно",
+        "well_not_found_in_filename": "в имени файла не найдена скважина",
+        "cluster_not_found_in_filename": "в имени файла не найден куст",
+        "ambiguous_target_folder": "найдено несколько подходящих папок, нельзя выбрать безопасно",
+        "Мятая скважина": "мятая скважина: папка скважины названа с лишним текстом",
+        "zero_size_file_skipped": "нулевой файл 0 байт, перенос отключён настройкой",
+        "source_stat_error": "не удалось прочитать свойства исходного файла",
+        "dest_stat_error": "не удалось прочитать свойства файла назначения",
+        "delete_old_destination_then_copy": "старый файл назначения должен быть удалён, затем будет записан новый",
+        "replace_src_newer_by_modified_time": "файл из A новее по дате изменения, будет заменён",
+        "skip_dest_newer_or_equal_by_modified_time": "в B файл новее или такой же, замена не нужна",
+        "destination_file_is_newer_or_equal_by_creation_time": "в B файл создан позже или одновременно, замена не нужна",
+        "destination_has_newer_or_equal_file": "в папке назначения уже есть такой же или более новый файл",
+        "locked": "файл занят другой программой",
+        "file_locked": "файл занят другой программой",
+        "permission_denied": "нет доступа к файлу или папке",
+    }
+
+    return mapping.get(reason, reason or "причина не указана")
+
+
+def _op_value(op: Any, name: str, default: Any = None) -> Any:
+    """Безопасно читает поле PlannedOp как атрибут или как ключ словаря."""
+    if isinstance(op, dict):
+        return op.get(name, default)
+    return getattr(op, name, default)
+
+
+def _format_plan_line(index: int, total: int, op: Any, phase: str = "ПЛАН") -> tuple[str, str]:
+    """
+    Делает понятную строку по одному PlannedOp.
+
+    Возвращает:
+        (level, message)
+    """
+    src = _op_value(op, "src", "")
+    dst = _op_value(op, "dst", "")
+    action = str(_op_value(op, "action", "") or "").lower()
+    reason = str(_op_value(op, "reason", "") or "")
+    src_mtime = _op_value(op, "src_mtime", None)
+    dst_mtime = _op_value(op, "dst_mtime", None)
+
+    if action == "copy":
+        level = "OK"
+        action_ru = "скопировать"
+        status = "будет скопирован"
+    elif action == "move":
+        level = "OK"
+        action_ru = "переместить"
+        status = "будет перемещён"
+    elif action == "skip":
+        level = "SKIP"
+        action_ru = "не переносить"
+        status = "не будет перенесён"
+    else:
+        level = "INFO"
+        action_ru = action or "неизвестно"
+        status = "действие не определено"
+
+    message = (
+        f"{phase} {index}/{total}\n"
+        f"  Файл A: {src}\n"
+        f"  Куда:   {dst}\n"
+        f"  Действие: {action_ru} — файл {status}\n"
+        f"  Почему: {_short_reason(reason)}\n"
+        f"  Код: {reason or '-'}"
+    )
+
+    if src_mtime is not None or dst_mtime is not None:
+        message += f"\n  Даты: A={src_mtime if src_mtime is not None else '-'}; B={dst_mtime if dst_mtime is not None else '-'}"
+
+    return level, message
+
+
+def _format_worker_line(line: str) -> tuple[str, str] | None:
+    """
+    Пытается преобразовать старую техническую строку worker/executor в понятный лог.
+
+    Поддерживает формат:
+        SKIP SKIP src -> dst | reason | details
+        OK COPY src -> dst | reason
+        ERR ... src -> dst | reason
+    """
+    raw = str(line or "").strip()
+    if not raw:
+        return None
+
+    m = re.match(
+        r"^(?P<level>OK|SKIP|ERR|ERROR|LOCKED|DEL)\s+"
+        r"(?:(?P<action>OK|COPY|MOVE|SKIP|ERR|ERROR|LOCKED|DEL)\s+)?"
+        r"(?P<src>.+?)\s+->\s+(?P<dst>.+?)"
+        r"(?:\s+\|\s+(?P<reason>[^|]+))?"
+        r"(?:\s+\|\s+(?P<details>.*))?$",
+        raw,
+        re.IGNORECASE,
+    )
+
+    if not m:
+        return None
+
+    level = m.group("level").upper()
+    src = m.group("src").strip()
+    dst = m.group("dst").strip()
+    reason = (m.group("reason") or "").strip()
+    details = (m.group("details") or "").strip()
+
+    if level == "OK":
+        title = "✅ ФАЙЛ ОБРАБОТАН"
+        status = "Файл успешно скопирован/перемещён."
+    elif level == "DEL":
+        title = "🗑️ УДАЛЕНИЕ"
+        status = "Старый файл удалён."
+    elif level == "LOCKED":
+        title = "🟡 ФАЙЛ ЗАНЯТ"
+        status = "Файл занят другой программой."
+    elif level in ("ERR", "ERROR"):
+        title = "❌ ОШИБКА"
+        status = "Файл не обработан из-за ошибки."
+        level = "ERR"
+    else:
+        title = "⏭️ ФАЙЛ НЕ ПЕРЕНЕСЁН"
+        status = "Операция пропущена."
+
+    msg = (
+        f"{title}\n"
+        f"  Статус: {status}\n"
+        f"  Файл A: {src}\n"
+        f"  Куда:   {dst}\n"
+        f"  Почему: {_short_reason(reason)}\n"
+        f"  Код: {reason or '-'}"
+    )
+
+    if details:
+        msg += f"\n  Детали: {details}"
+
+    return level, msg
+
+
 def _find_project_worker_class() -> Optional[type]:
     """
     Ищет worker в filesorter.worker.
@@ -205,6 +351,15 @@ class FallbackWorker(QObject):
             self.log_message.emit(
                 f"INFO План построен: {total} элементов (dry_run={self.settings.dry_run})."
             )
+
+            # Подробный лог по каждому файлу ДО выполнения.
+            # Это важно, если executor.py сам не пишет, какой файл куда пошёл.
+            try:
+                for idx, op in enumerate(plan, start=1):
+                    level, msg = _format_plan_line(idx, total, op, phase="ПЛАН")
+                    self.log_message.emit(f"{level} {msg}")
+            except Exception as exc:
+                self.log_message.emit(f"ERR Не удалось вывести подробный план: {exc}")
 
             result = _call_with_supported_args(
                 execute_plan,
@@ -521,7 +676,8 @@ class MainWindow(QMainWindow):
             "ERROR": "#cc0000",
         }.get(level_text, "#000000")
 
-        self.log_view.append(f'<span style="color:{color};">{html.escape(line)}</span>')
+        safe_line = html.escape(line).replace("\n", "<br>")
+        self.log_view.append(f'<span style="color:{color};">{safe_line}</span>')
         cursor = self.log_view.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_view.setTextCursor(cursor)
@@ -531,9 +687,22 @@ class MainWindow(QMainWindow):
             return
 
         if len(args) == 1:
-            self._append_log(str(args[0]))
+            line = str(args[0])
+            formatted = _format_worker_line(line)
+            if formatted is not None:
+                level, message = formatted
+                self._append_log(level, message)
+            else:
+                self._append_log(line)
         else:
-            self._append_log(str(args[0]), " ".join(str(arg) for arg in args[1:]))
+            level = str(args[0])
+            message = " ".join(str(arg) for arg in args[1:])
+            formatted = _format_worker_line(f"{level} {message}")
+            if formatted is not None:
+                fmt_level, fmt_message = formatted
+                self._append_log(fmt_level, fmt_message)
+            else:
+                self._append_log(level, message)
 
     def _clear_log(self) -> None:
         self.log_view.clear()
@@ -648,26 +817,14 @@ class MainWindow(QMainWindow):
     # Worker
     # ------------------------------------------------------------------
     def _start_worker(self, settings: Settings) -> None:
-        worker_cls = _find_project_worker_class()
-
-        if worker_cls is None:
-            self._append_log("INFO", "filesorter.worker не найден, использую встроенный worker.")
-            worker = FallbackWorker(settings)
-            self._start_qobject_worker(worker)
-            return
-
-        try:
-            worker = worker_cls(settings)
-        except TypeError:
-            worker = worker_cls(settings=settings)
-
-        if isinstance(worker, QThread):
-            self.worker_obj = worker
-            self.worker_thread = worker
-            self._connect_worker_signals(worker)
-            worker.start()
-        else:
-            self._start_qobject_worker(worker)
+        # ВАЖНО:
+        # Используем встроенный подробный worker, а не filesorter.worker.
+        # Причина: внешний worker часто отдаёт только итог OK/SKIP/ERR без строк по каждому файлу.
+        # Встроенный worker строит plan сам и перед выполнением печатает:
+        #   Файл A -> Куда -> Действие -> Почему.
+        self._append_log("INFO", "Использую встроенный подробный worker: будет показан каждый файл, путь назначения и причина действия.")
+        worker = FallbackWorker(settings)
+        self._start_qobject_worker(worker)
 
     def _start_qobject_worker(self, worker: QObject) -> None:
         thread = QThread(self)
